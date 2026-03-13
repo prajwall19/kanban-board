@@ -1,6 +1,5 @@
-// Mini Kanban Board Logic
+// Kanban Board Logic
 
-const STORAGE_KEY = "mini-kanban-board-state-v1";
 const THEME_KEY = "mini-kanban-theme";
 
 const columns = {
@@ -30,33 +29,10 @@ let state = {
   done: [],
 };
 
-// Utility functions
-function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  } catch (e) {
-    console.error("Failed to save board state:", e);
-  }
-}
+let db = null;
+let tasksCollection = null;
 
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw);
-    if (
-      typeof parsed === "object" &&
-      parsed &&
-      Array.isArray(parsed.todo) &&
-      Array.isArray(parsed.doing) &&
-      Array.isArray(parsed.done)
-    ) {
-      state = parsed;
-    }
-  } catch (e) {
-    console.warn("Failed to parse board state, starting fresh.", e);
-  }
-}
+// Utility functions
 
 function updateCounts() {
   counts.todo.textContent = state.todo.length;
@@ -165,24 +141,44 @@ function addTask(title) {
     return;
   }
 
-  const task = {
-    id: Date.now().toString(36) + Math.random().toString(16).slice(2),
-    title: trimmed,
-  };
+  hideError();
 
-  state.todo.unshift(task);
-  saveState();
-  renderBoard();
+  if (tasksCollection) {
+    tasksCollection
+      .add({
+        title: trimmed,
+        column: "todo",
+        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+      })
+      .catch((e) => {
+        console.error("Failed to add task to Firestore:", e);
+      });
+  } else {
+    // Fallback: in-memory only if Firebase is not available
+    const task = {
+      id: Date.now().toString(36) + Math.random().toString(16).slice(2),
+      title: trimmed,
+    };
+    state.todo.unshift(task);
+    renderBoard();
+  }
 
   taskTitleInput.value = "";
-  hideError();
   taskTitleInput.focus();
 }
 
 function deleteTask(taskId, columnKey) {
-  state[columnKey] = state[columnKey].filter((t) => t.id !== taskId);
-  saveState();
-  renderBoard();
+  if (tasksCollection) {
+    tasksCollection
+      .doc(taskId)
+      .delete()
+      .catch((e) => {
+        console.error("Failed to delete task from Firestore:", e);
+      });
+  } else {
+    state[columnKey] = state[columnKey].filter((t) => t.id !== taskId);
+    renderBoard();
+  }
 }
 
 function moveTask(taskId, fromColumn, direction) {
@@ -199,14 +195,21 @@ function moveTask(taskId, fromColumn, direction) {
   if (toIndex === fromIndex) return;
 
   const toColumn = order[toIndex];
-  const taskIndex = state[fromColumn].findIndex((t) => t.id === taskId);
-  if (taskIndex === -1) return;
+  if (tasksCollection) {
+    tasksCollection
+      .doc(taskId)
+      .update({ column: toColumn })
+      .catch((e) => {
+        console.error("Failed to move task in Firestore:", e);
+      });
+  } else {
+    const taskIndex = state[fromColumn].findIndex((t) => t.id === taskId);
+    if (taskIndex === -1) return;
 
-  const [task] = state[fromColumn].splice(taskIndex, 1);
-  state[toColumn].unshift(task);
-
-  saveState();
-  renderBoard();
+    const [task] = state[fromColumn].splice(taskIndex, 1);
+    state[toColumn].unshift(task);
+    renderBoard();
+  }
 }
 
 // Error handling for input
@@ -285,15 +288,22 @@ function handleDrop(e) {
     return;
   }
 
-  const fromTasks = state[dragSourceColumnKey];
-  const taskIndex = fromTasks.findIndex((t) => t.id === dragSourceTaskId);
-  if (taskIndex === -1) return;
+  if (tasksCollection) {
+    tasksCollection
+      .doc(dragSourceTaskId)
+      .update({ column: targetColumnKey })
+      .catch((e) => {
+        console.error("Failed to move task (drag/drop) in Firestore:", e);
+      });
+  } else {
+    const fromTasks = state[dragSourceColumnKey];
+    const taskIndex = fromTasks.findIndex((t) => t.id === dragSourceTaskId);
+    if (taskIndex === -1) return;
 
-  const [task] = fromTasks.splice(taskIndex, 1);
-  state[targetColumnKey].unshift(task);
-
-  saveState();
-  renderBoard();
+    const [task] = fromTasks.splice(taskIndex, 1);
+    state[targetColumnKey].unshift(task);
+    renderBoard();
+  }
 }
 
 // Theme handling
@@ -358,9 +368,23 @@ clearBoardBtn?.addEventListener("click", () => {
   );
   if (!confirmed) return;
 
-  state = { todo: [], doing: [], done: [] };
-  saveState();
-  renderBoard();
+  if (tasksCollection && db) {
+    tasksCollection
+      .get()
+      .then((snapshot) => {
+        const batch = db.batch();
+        snapshot.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        return batch.commit();
+      })
+      .catch((e) => {
+        console.error("Failed to clear tasks from Firestore:", e);
+      });
+  } else {
+    state = { todo: [], doing: [], done: [] };
+    renderBoard();
+  }
 });
 
 themeToggleBtn?.addEventListener("click", toggleTheme);
@@ -372,8 +396,38 @@ Object.values(columns).forEach((columnEl) => {
   columnEl.addEventListener("drop", handleDrop);
 });
 
+function startFirestoreListener() {
+  if (!window.firebase) {
+    console.warn("Firebase SDK not found. Board will not sync to Firestore.");
+    return;
+  }
+  db = firebase.firestore();
+  tasksCollection = db.collection("tasks");
+
+  tasksCollection.orderBy("createdAt", "asc").onSnapshot(
+    (snapshot) => {
+      const nextState = { todo: [], doing: [], done: [] };
+      snapshot.forEach((doc) => {
+        const data = doc.data() || {};
+        const columnKey = data.column || "todo";
+        const title = data.title || "";
+        if (!nextState[columnKey]) return;
+        nextState[columnKey].push({
+          id: doc.id,
+          title,
+        });
+      });
+      state = nextState;
+      renderBoard();
+    },
+    (error) => {
+      console.error("Error listening to Firestore tasks:", error);
+    }
+  );
+}
+
 // Initial load
 loadTheme();
-loadState();
+startFirestoreListener();
 renderBoard();
 

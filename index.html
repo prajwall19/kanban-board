@@ -6,6 +6,9 @@
     <title>Mini Kanban Board</title>
     <!-- TailwindCSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase (App + Firestore) -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore-compat.js"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -28,6 +31,21 @@
         },
         darkMode: "class",
       };
+    </script>
+    <script>
+      const firebaseConfig = {
+        apiKey: "AIzaSyCz5bMVsKsWPCnCsa514Ri6_2jLUWZ-Udk",
+        authDomain: "kanbanweb-54712.firebaseapp.com",
+        projectId: "kanbanweb-54712",
+        storageBucket: "kanbanweb-54712.firebasestorage.app",
+        messagingSenderId: "76628254217",
+        appId: "1:76628254217:web:d624b20c05203bde0322d8",
+        measurementId: "G-DGXXLC1QYF",
+      };
+
+      if (window.firebase && !firebase.apps.length) {
+        firebase.initializeApp(firebaseConfig);
+      }
     </script>
   </head>
   <body
